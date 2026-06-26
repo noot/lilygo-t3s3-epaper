@@ -135,6 +135,10 @@ where
         // dio2 drives the antenna rf switch; route the irqs to dio1.
         self.write_cmd(cmd::SET_DIO2_AS_RF_SWITCH, &[0x01])?;
         self.set_dio_irq_params()?;
+
+        // calibration transiently latches device-error bits (e.g. PLL_LOCK_ERR);
+        // clear them so device_errors() reports runtime faults, not init noise.
+        self.write_cmd(cmd::CLEAR_DEVICE_ERRORS, &[0x00, 0x00])?;
         Ok(())
     }
 
