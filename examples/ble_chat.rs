@@ -85,10 +85,16 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // the tx/rx examples avoid max because of esp-hal's MISO input-delay bug on
     // the radio spi bus, but that bus isn't used here and the display spi is
     // write-only, so max is safe for this example.
+    // route trouble-host's internal `log` output to the serial monitor so the
+    // ble handshake is visible. INFO catches its connection warnings (e.g. "no
+    // memory for packets") without the timing-disrupting per-packet TRACE spam.
+    esp_println::logger::init_logger(log::LevelFilter::Debug);
+
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
-    // the ble controller needs a heap; 72 KiB is what the trouble esp32 examples use.
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    // the ble controller needs a heap; bumped above the old 72 KiB esp-wifi
+    // default to leave headroom for an active connection's buffers.
+    esp_alloc::heap_allocator!(size: 96 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_ints = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
@@ -124,7 +130,14 @@ async fn main(_spawner: embassy_executor::Spawner) {
     );
     display.refresh().unwrap();
 
-    let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
+    // the esp32-s3 is the only chip whose esp-radio ble Config defaults
+    // `verify_access_address` to true (esp32/c6/h2/c5 all default it false). it
+    // turns on stricter CONNECT_IND access-address checking in the controller
+    // that silently drops connection requests from standard centrals, so the
+    // device advertises but the phone's connect never completes and no event
+    // reaches the host. disable it to accept normal phones.
+    let ble_config = esp_radio::ble::Config::default().with_verify_access_address(false);
+    let connector = BleConnector::new(peripherals.BT, ble_config).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
     let address = Address::random([0xff, 0x10, 0x05, 0x05, 0xe4, 0xff]);
