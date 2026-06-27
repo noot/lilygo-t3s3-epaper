@@ -88,7 +88,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // route trouble-host's internal `log` output to the serial monitor so the
     // ble handshake is visible. INFO catches its connection warnings (e.g. "no
     // memory for packets") without the timing-disrupting per-packet TRACE spam.
-    esp_println::logger::init_logger(log::LevelFilter::Debug);
+    esp_println::logger::init_logger(log::LevelFilter::Info);
 
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
@@ -295,7 +295,16 @@ async fn serve<P: PacketPool>(
                     Err(e) => println!("gatt reply error: {e:?}"),
                 }
             }
-            _ => println!("other conn event"),
+            GattConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
+                println!("phy updated: tx={tx_phy:?} rx={rx_phy:?}");
+            }
+            GattConnectionEvent::ConnectionParamsUpdated { conn_interval, .. } => {
+                println!("conn params updated: interval={conn_interval:?}");
+            }
+            GattConnectionEvent::DataLengthUpdated { .. } => println!("data length updated"),
+            // the central drives param updates fine without a peripheral reply,
+            // and responding would need the stack threaded in here; ignore it.
+            GattConnectionEvent::RequestConnectionParams(_) => {}
         }
     }
 }
