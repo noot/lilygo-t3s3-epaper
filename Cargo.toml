@@ -19,8 +19,36 @@ esp-println = { version = "0.17", features = ["esp32s3"] }
 embedded-hal-bus = "0.3"
 embedded-graphics = "0.8"
 
+# ble stack for the ble_chat example. esp-radio (formerly esp-wifi) is the
+# controller, esp-rtos provides the embassy executor + radio scheduler, and
+# trouble is the gatt host. these are pinned against esp-hal 1.1 — this corner
+# of the ecosystem churns, so expect to re-pin if cargo can't resolve.
+esp-radio = { version = "0.18", features = ["esp32s3", "ble", "unstable"] }
+esp-rtos = { version = "0.3", features = ["esp32s3", "embassy", "esp-radio"] }
+esp-alloc = "0.10"
+embassy-executor = "0.10"
+embassy-time = "0.5"
+# match trouble's embassy-sync, so the gatt macro's NoopRawMutex is the same type.
+embassy-sync = "0.7"
+embassy-futures = "0.1"
+# trouble 0.6 uses bt-hci 0.8, matching esp-radio 0.18 — 0.7 moved to bt-hci 0.9
+# and no longer agrees with esp-radio's released Controller impl on crates.io.
+trouble-host = { version = "0.6", features = ["default-packet-pool-mtu-255", "derive"] }
+bt-hci = "0.8"
+# must match the versions trouble uses, or its trait impls won't apply.
+heapless = "0.9"
+static_cell = "2.1"
+
 # esp-hal strongly recommends building dependencies with optimizations even in dev.
 [profile.dev.package.esp-hal]
+opt-level = 3
+
+# esp-radio's docs require opt-level 2 or 3, otherwise it may fail to advertise
+# or connect. the scheduler in esp-rtos is timing-sensitive too.
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+[profile.dev.package.esp-rtos]
 opt-level = 3
 
 [profile.dev]
