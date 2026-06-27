@@ -19,6 +19,7 @@ use embedded_graphics_core::pixelcolor::BinaryColor;
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::spi::SpiDevice;
+use embedded_hal_async::digital::Wait;
 
 use command as cmd;
 pub use error::Error;
@@ -132,16 +133,23 @@ where
     /// A full [`refresh`](Self::refresh) must have run at least once first so the
     /// panel has a reference image to diff against.
     pub fn refresh_partial(&mut self) -> Result<(), Error<SPI::Error, PE>> {
+        self.start_partial_refresh()?;
+        self.wait_busy()?;
+        // resync the reference bank with what is now on screen.
+        self.write_ram(cmd::WRITE_RAM_RED)
+    }
+
+    /// Load the partial LUT and framebuffer and kick off the update. BUSY is held
+    /// high until the panel finishes; the caller waits on it, then must resync the
+    /// reference bank with [`write_ram(WRITE_RAM_RED)`](Self::write_ram).
+    fn start_partial_refresh(&mut self) -> Result<(), Error<SPI::Error, PE>> {
         self.cmd_data(cmd::WRITE_LUT, &lut::PARTIAL)?;
         self.write_ram(cmd::WRITE_RAM_BW)?;
         self.cmd_data(
             cmd::DISPLAY_UPDATE_CONTROL_2,
             &[cmd::UPDATE_SEQUENCE_PARTIAL],
         )?;
-        self.command(cmd::MASTER_ACTIVATION)?;
-        self.wait_busy()?;
-        // resync the reference bank with what is now on screen.
-        self.write_ram(cmd::WRITE_RAM_RED)
+        self.command(cmd::MASTER_ACTIVATION)
     }
 
     /// Put the panel into deep sleep (retaining the displayed image). Call
@@ -222,6 +230,25 @@ where
             self.delay.delay_ms(BUSY_POLL_MS);
         }
         Err(Error::Timeout)
+    }
+}
+
+impl<SPI, DC, RST, BUSY, DELAY, PE> Display<SPI, DC, RST, BUSY, DELAY>
+where
+    SPI: SpiDevice<u8>,
+    DC: OutputPin<Error = PE>,
+    RST: OutputPin<Error = PE>,
+    BUSY: InputPin<Error = PE> + Wait<Error = PE>,
+    DELAY: DelayNs,
+{
+    /// Partial refresh that awaits the BUSY falling edge instead of busy-polling
+    /// it. A partial refresh holds the executor for a few hundred milliseconds if
+    /// polled; awaiting frees it to run other tasks (e.g. a BLE stack) during the
+    /// panel update.
+    pub async fn refresh_partial_async(&mut self) -> Result<(), Error<SPI::Error, PE>> {
+        self.start_partial_refresh()?;
+        self.busy.wait_for_low().await.map_err(Error::Pin)?;
+        self.write_ram(cmd::WRITE_RAM_RED)
     }
 }
 

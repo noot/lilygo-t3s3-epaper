@@ -15,6 +15,7 @@ pub mod params;
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::spi::SpiBus;
+use embedded_hal_async::digital::Wait;
 
 use command as cmd;
 pub use error::Error;
@@ -144,6 +145,16 @@ where
 
     /// Transmit a LoRa packet, blocking until the radio reports TxDone.
     pub fn transmit(&mut self, data: &[u8]) -> Result<(), Error<SPI::Error, PE>> {
+        self.start_transmit(data)?;
+        // busy stays high during transmission, so wait on the dio1 line.
+        self.wait_dio1(Some(TX_POLL_ITERS))?;
+        self.finish_transmit()
+    }
+
+    /// Load `data` and kick off a transmit. `set_tx` with a zero timeout means
+    /// transmit until done; completion is signalled on DIO1, which the caller
+    /// waits on (by polling or, in the async variant, by awaiting the edge).
+    fn start_transmit(&mut self, data: &[u8]) -> Result<(), Error<SPI::Error, PE>> {
         if data.is_empty() || data.len() > 255 {
             return Err(Error::BufferTooSmall);
         }
@@ -151,11 +162,12 @@ where
         self.set_packet_params(data.len() as u8)?;
         self.write_buffer(0, data)?;
         self.clear_irq_status(cmd::IRQ_ALL)?;
+        self.write_cmd(cmd::SET_TX, &[0x00, 0x00, 0x00])
+    }
 
-        // set_tx with a zero timeout means transmit until done. busy stays high
-        // during transmission, so wait on the dio1 line, then read the irq.
-        self.write_cmd(cmd::SET_TX, &[0x00, 0x00, 0x00])?;
-        self.wait_dio1(Some(TX_POLL_ITERS))?;
+    /// Read and clear the IRQ status after DIO1 has signalled, mapping a missing
+    /// `TX_DONE` flag to a timeout.
+    fn finish_transmit(&mut self) -> Result<(), Error<SPI::Error, PE>> {
         let irq = self.get_irq_status()?;
         self.clear_irq_status(cmd::IRQ_ALL)?;
         if irq & cmd::IRQ_TX_DONE == 0 {
@@ -392,5 +404,25 @@ where
             }
             self.delay.delay_ms(IRQ_POLL_MS);
         }
+    }
+}
+
+impl<SPI, CS, RST, BUSY, DIO1, DELAY, PE> Sx1262<SPI, CS, RST, BUSY, DIO1, DELAY>
+where
+    SPI: SpiBus<u8>,
+    CS: OutputPin<Error = PE>,
+    RST: OutputPin<Error = PE>,
+    BUSY: InputPin<Error = PE>,
+    DIO1: InputPin<Error = PE> + Wait<Error = PE>,
+    DELAY: DelayNs,
+{
+    /// Transmit a LoRa packet, awaiting the DIO1 TX-done edge rather than
+    /// busy-polling it. The over-air time can run from milliseconds to seconds
+    /// depending on the spreading factor; awaiting frees the executor to run
+    /// other tasks (e.g. a BLE stack) instead of starving them with a spin loop.
+    pub async fn transmit_async(&mut self, data: &[u8]) -> Result<(), Error<SPI::Error, PE>> {
+        self.start_transmit(data)?;
+        self.dio1.wait_for_high().await.map_err(Error::Pin)?;
+        self.finish_transmit()
     }
 }

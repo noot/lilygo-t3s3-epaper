@@ -6,6 +6,9 @@ edition = "2024"
 # the library is pure embedded-hal, so it stays platform-agnostic and testable.
 [dependencies]
 embedded-hal = "1.0"
+# async GPIO waits (the `Wait` trait) so drivers can yield to the executor while
+# the radio transmits or the panel refreshes, instead of busy-polling a pin.
+embedded-hal-async = "1.0"
 embedded-graphics-core = "0.4"
 
 # the esp32-s3 platform glue is only needed to build and run the examples.

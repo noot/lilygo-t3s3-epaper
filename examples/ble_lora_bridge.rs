@@ -1,12 +1,13 @@
-//! BLE chat example: expose a Nordic UART Service (NUS) so a phone can connect
-//! over bluetooth low energy and exchange text. Whatever the phone writes is
-//! echoed back to it and shown on the e-paper display.
+//! BLE-to-LoRa bridge: a phone connects over BLE to a Nordic UART Service (NUS),
+//! and whatever it writes is broadcast over LoRa (SX1262), echoed back to the
+//! phone, and shown as the last sent message on the e-paper display.
 //!
-//! this is step one of the phone<->lora bridge: it proves the ble stack brings
-//! up and a phone can connect, with no radio wired in yet. pair from an android
-//! app that speaks NUS (e.g. "Serial Bluetooth Terminal" in BLE mode).
+//! built on top of the `ble_chat` NUS echo example, with the SX1262 radio wired
+//! in. the reverse path (LoRa packets -> phone notifications) is not done yet;
+//! this is the phone -> LoRa direction. pair from an android app that speaks NUS
+//! (e.g. "Serial Bluetooth Terminal" in BLE mode).
 //!
-//! Flash with `cargo run --example ble_chat`.
+//! Flash with `cargo run --example ble_lora_bridge`.
 
 #![no_std]
 #![no_main]
@@ -15,11 +16,10 @@
 
 use core::fmt::Write as _;
 
-use embassy_futures::join::join;
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::join::join4;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_10X20};
@@ -27,9 +27,7 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Line, PrimitiveStyle};
 use embedded_graphics::text::Text;
-use embedded_hal::delay::DelayNs;
-use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_hal::spi::SpiDevice;
+use embedded_hal::delay::DelayNs as _;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
@@ -46,6 +44,7 @@ use heapless::Vec;
 use trouble_host::prelude::*;
 
 use lilygo_t3s3_epaper::ssd1680::{Display, Rotation};
+use lilygo_t3s3_epaper::sx1262::{Config as RadioConfig, Sx1262};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -59,8 +58,6 @@ const MSG_CAP: usize = 64;
 const NUS_SERVICE_UUID_LE: [u8; 16] = [
     0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0, 0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e,
 ];
-/// do a clean full refresh every this many updates to clear partial-refresh ghosting.
-const FULL_REFRESH_EVERY: u32 = 10;
 
 // nordic uart service: 6e400001 (service), 6e400002 rx (phone -> device),
 // 6e400003 tx (device -> phone). the gatt macros require uuid string literals.
@@ -81,20 +78,20 @@ struct NusService {
     tx: Vec<u8, MSG_CAP>,
 }
 
-/// latest text received from the phone, handed to the display task.
+/// latest text received from the phone, handed to the lora/display worker.
 type DisplaySignal = Signal<CriticalSectionRawMutex, Vec<u8, MSG_CAP>>;
 
 #[esp_rtos::main]
 async fn main(_spawner: embassy_executor::Spawner) {
-    // esp-radio's ble controller needs the full clock to actually get on air;
-    // the tx/rx examples avoid max because of esp-hal's MISO input-delay bug on
-    // the radio spi bus, but that bus isn't used here and the display spi is
-    // write-only, so max is safe for this example.
     // route trouble-host's internal `log` output to the serial monitor so the
     // ble handshake is visible. INFO catches its connection warnings (e.g. "no
     // memory for packets") without the timing-disrupting per-packet TRACE spam.
     esp_println::logger::init_logger(log::LevelFilter::Info);
 
+    // clock is NOT the cause of the supervision timeouts: with the worker fully
+    // disabled the link still drops at both 240 and 160 MHz (160 is worse — the
+    // controller is too starved to even advertise promptly). left at 240 while the
+    // real cause (controller starved when the executor goes idle) is investigated.
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
     // the ble controller needs a heap; bumped above the old 72 KiB esp-wifi
@@ -128,12 +125,53 @@ async fn main(_spawner: embassy_executor::Spawner) {
     display.init().unwrap();
     render(
         &mut display,
-        "BLE chat",
-        "advertising...",
+        "LoRa bridge",
+        "starting radio...",
         "name: lora-bridge",
         "",
     );
     display.refresh().unwrap();
+
+    // lora radio (sx1262) on its own spi bus: sck=5, mosi=6, miso=3, nss=7.
+    let radio_spi = Spi::new(
+        peripherals.SPI2,
+        SpiConfig::default()
+            .with_frequency(Rate::from_mhz(1))
+            .with_mode(Mode::_0),
+    )
+    .unwrap()
+    .with_sck(peripherals.GPIO5)
+    .with_mosi(peripherals.GPIO6)
+    .with_miso(peripherals.GPIO3);
+    let radio_cs = Output::new(peripherals.GPIO7, Level::High, OutputConfig::default());
+    let radio_rst = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
+    let radio_busy = Input::new(
+        peripherals.GPIO34,
+        InputConfig::default().with_pull(Pull::None),
+    );
+    let radio_dio1 = Input::new(
+        peripherals.GPIO33,
+        InputConfig::default().with_pull(Pull::None),
+    );
+    // power the radio's oscillator rail (gpio35); hold the handle so it stays
+    // driven for the life of the program, else the xosc never starts.
+    let _radio_pow = Output::new(peripherals.GPIO35, Level::High, OutputConfig::default());
+    Delay::new().delay_ms(10);
+    let mut radio = Sx1262::new(
+        radio_spi,
+        radio_cs,
+        radio_rst,
+        radio_busy,
+        radio_dio1,
+        Delay::new(),
+        RadioConfig::default(),
+    );
+    radio.init().unwrap();
+    println!(
+        "sx1262 ready at 915 MHz (status={:#04x}, device_errors={:#06x})",
+        radio.status().unwrap(),
+        radio.device_errors().unwrap()
+    );
 
     // the esp32-s3 is the only chip whose esp-radio ble Config defaults
     // `verify_access_address` to true (esp32/c6/h2/c5 all default it false). it
@@ -163,14 +201,78 @@ async fn main(_spawner: embassy_executor::Spawner) {
     }))
     .unwrap();
 
-    // the host runner and the connection handler are the only two long-lived
-    // tasks now; the display is driven from inside the connection's `select3`
-    // loop (see `serve`) rather than a third task.
-    join(
+    let signal: DisplaySignal = Signal::new();
+
+    // on each message: broadcast it over LoRa, then show it as the last sent
+    // message on the e-paper. this owns both the radio and the display and lives
+    // inline so it can call their concrete methods. the radio tx and panel refresh
+    // both wait on a GPIO line for completion; using the async (`*_async`) variants
+    // means those waits yield to the executor, so the ble controller — which shares
+    // this core — keeps servicing the link instead of being starved by a spin loop
+    // into a supervision timeout (the bug the blocking variants caused here).
+    let worker = async {
+        let mut counter: u32 = 0;
+        loop {
+            let msg = signal.wait().await;
+            // DIAGNOSTIC: time the whole iteration. this is how long the executor is
+            // held between yields; compare it against the supervision-timeout budget
+            // printed by `serve`. radio TX and the display flush (below) are disabled
+            // to isolate whether the worker is what trips the timeout. expect an
+            // "unused variable: radio" warning while this is in place.
+            let started = Instant::now();
+            println!("worker got msg #{counter} (radio + display flush disabled)");
+            let status = "lora: (disabled)";
+            let mut line = FmtBuf::new();
+            match core::str::from_utf8(&msg) {
+                Ok(text) => {
+                    let _ = write!(line, "sent: {text}");
+                }
+                Err(_) => {
+                    let _ = write!(line, "sent: <binary>");
+                }
+            }
+            let mut count = FmtBuf::new();
+            let _ = write!(count, "#{counter}");
+            render(
+                &mut display,
+                "LoRa bridge",
+                count.as_str(),
+                line.as_str(),
+                status,
+            );
+            // DIAGNOSTIC: display flush disabled (see note above). the framebuffer
+            // is still drawn by render() so the panel just won't update on screen.
+            let _ = &display;
+            println!(
+                "worker #{counter} held the executor for {} ms",
+                started.elapsed().as_millis()
+            );
+            counter = counter.wrapping_add(1);
+        }
+    };
+
+    join4(
         ble_task(runner),
-        connection_loop(&mut peripheral, &server, &mut display),
+        connection_loop(&mut peripheral, &server, &signal),
+        worker,
+        heartbeat(),
     )
     .await;
+}
+
+/// DIAGNOSTIC: print uptime every 2s. while a phone is connected, watch these:
+/// if the heartbeats keep ticking on schedule but the link still drops, the
+/// controller is being starved at the radio level (not the host task), which fits
+/// the "drops even when idle" symptom. if they stutter or stop, the executor
+/// itself is stalling. the periodic wake is also the experiment for the idle
+/// theory: if its mere presence stops the drops, the executor was sleeping too
+/// deeply between connection events to service the controller.
+async fn heartbeat() {
+    let start = Instant::now();
+    loop {
+        Timer::after(Duration::from_secs(2)).await;
+        println!("heartbeat: up {} ms", start.elapsed().as_millis());
+    }
 }
 
 /// background task that drives the host stack; must run for the whole program.
@@ -183,21 +285,11 @@ async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
 }
 
 /// advertise, accept one connection, serve it until it drops, then repeat.
-async fn connection_loop<'values, C, SPI, DC, RST, BUSY, DELAY, PE>(
+async fn connection_loop<'values, C: Controller>(
     peripheral: &mut Peripheral<'values, C, DefaultPacketPool>,
     server: &Server<'values>,
-    display: &mut Display<SPI, DC, RST, BUSY, DELAY>,
-) where
-    C: Controller,
-    SPI: SpiDevice<u8>,
-    DC: OutputPin<Error = PE>,
-    RST: OutputPin<Error = PE>,
-    BUSY: InputPin<Error = PE>,
-    DELAY: DelayNs,
-{
-    // counter lives here so the full-refresh cadence and message numbering carry
-    // across reconnects, not just within a single connection.
-    let mut counter: u32 = 0;
+    signal: &DisplaySignal,
+) {
     loop {
         println!("advertising as lora-bridge...");
         let conn = match advertise(peripheral, server).await {
@@ -208,7 +300,7 @@ async fn connection_loop<'values, C, SPI, DC, RST, BUSY, DELAY, PE>(
             }
         };
         println!("phone connected");
-        serve(server, &conn, display, &mut counter).await;
+        serve(server, &conn, signal).await;
         println!("phone disconnected");
     }
 }
@@ -247,96 +339,68 @@ async fn advertise<'values, 'server, C: Controller>(
     Ok(conn)
 }
 
-/// handle one connection in a single `select3` loop racing three sources: inbound
-/// BLE events, a render mailbox, and a 1 s idle tick. an incoming write is echoed
-/// to the phone and dropped into the mailbox; the render arm picks it up on the
-/// next iteration, so the (blocking) e-paper refresh runs *after* the ATT write
-/// response has gone out instead of delaying it. the idle tick logs once a second
-/// of quiet so the serial output shows the link is still alive when nothing else
-/// is happening.
-async fn serve<P, SPI, DC, RST, BUSY, DELAY, PE>(
+/// handle one connection: echo every write back to the phone and hand it to the
+/// lora/display worker via the signal.
+async fn serve<P: PacketPool>(
     server: &Server<'_>,
     conn: &GattConnection<'_, '_, P>,
-    display: &mut Display<SPI, DC, RST, BUSY, DELAY>,
-    counter: &mut u32,
-) where
-    P: PacketPool,
-    SPI: SpiDevice<u8>,
-    DC: OutputPin<Error = PE>,
-    RST: OutputPin<Error = PE>,
-    BUSY: InputPin<Error = PE>,
-    DELAY: DelayNs,
-{
+    signal: &DisplaySignal,
+) {
     let rx = &server.nus.rx;
     let tx = &server.nus.tx;
-    // one-slot mailbox handing the latest received text from the gatt arm to the
-    // render arm of the same loop; `Signal` latches, so a value posted in one
-    // iteration is delivered on the next.
-    let to_render: DisplaySignal = Signal::new();
     loop {
-        match select3(
-            conn.next(),
-            to_render.wait(),
-            Timer::after(Duration::from_secs(1)),
-        )
-        .await
-        {
-            Either3::First(event) => match event {
-                GattConnectionEvent::Disconnected { reason } => {
-                    println!("disconnect reason: {reason:?}");
-                    break;
-                }
-                GattConnectionEvent::Gatt { event } => {
-                    if let GattEvent::Write(write) = &event
-                        && write.handle() == rx.handle
-                    {
-                        let data = write.data();
-                        let msg: Vec<u8, MSG_CAP> =
-                            Vec::from_slice(&data[..data.len().min(MSG_CAP)]).unwrap_or_default();
-                        println!("rx from phone: {:?}", core::str::from_utf8(&msg));
-                        // echo it straight back to the phone.
-                        if tx.notify(conn, &msg).await.is_err() {
-                            println!("notify failed");
-                        }
-                        to_render.signal(msg);
-                    }
-                    match event.accept() {
-                        Ok(reply) => reply.send().await,
-                        Err(e) => println!("gatt reply error: {e:?}"),
-                    }
-                }
-                GattConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
-                    println!("phy updated: tx={tx_phy:?} rx={rx_phy:?}");
-                }
-                GattConnectionEvent::ConnectionParamsUpdated { conn_interval, .. } => {
-                    println!("conn params updated: interval={conn_interval:?}");
-                }
-                GattConnectionEvent::DataLengthUpdated { .. } => println!("data length updated"),
-                // the central drives param updates fine without a peripheral reply,
-                // and responding would need the stack threaded in here; ignore it.
-                GattConnectionEvent::RequestConnectionParams(_) => {}
-            },
-            Either3::Second(msg) => {
-                let mut line = FmtBuf::new();
-                match core::str::from_utf8(&msg) {
-                    Ok(text) => {
-                        let _ = write!(line, "msg: {text}");
-                    }
-                    Err(_) => {
-                        let _ = write!(line, "msg: <binary>");
-                    }
-                }
-                let mut count = FmtBuf::new();
-                let _ = write!(count, "#{}", *counter);
-                render(display, "BLE chat", count.as_str(), line.as_str(), "");
-                if counter.is_multiple_of(FULL_REFRESH_EVERY) {
-                    let _ = display.refresh();
-                } else {
-                    let _ = display.refresh_partial();
-                }
-                *counter = counter.wrapping_add(1);
+        match conn.next().await {
+            GattConnectionEvent::Disconnected { reason } => {
+                println!("disconnect reason: {reason:?}");
+                break;
             }
-            Either3::Third(()) => println!("idle tick (link up)"),
+            GattConnectionEvent::Gatt { event } => {
+                // DIAGNOSTIC: time the whole gatt-event path (notify + signal +
+                // accept). this runs on the same executor as the controller-facing
+                // runner, so anything long here eats into the supervision budget
+                // printed on the params-updated line below.
+                let started = Instant::now();
+                if let GattEvent::Write(write) = &event
+                    && write.handle() == rx.handle
+                {
+                    let data = write.data();
+                    let msg: Vec<u8, MSG_CAP> =
+                        Vec::from_slice(&data[..data.len().min(MSG_CAP)]).unwrap_or_default();
+                    println!("rx from phone: {:?}", core::str::from_utf8(&msg));
+                    // echo it straight back to the phone.
+                    if tx.notify(conn, &msg).await.is_err() {
+                        println!("notify failed");
+                    }
+                    signal.signal(msg);
+                }
+                match event.accept() {
+                    Ok(reply) => reply.send().await,
+                    Err(e) => println!("gatt reply error: {e:?}"),
+                }
+                println!("gatt event handled in {} ms", started.elapsed().as_millis());
+            }
+            GattConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
+                println!("phy updated: tx={tx_phy:?} rx={rx_phy:?}");
+            }
+            GattConnectionEvent::ConnectionParamsUpdated {
+                conn_interval,
+                peripheral_latency,
+                supervision_timeout,
+            } => {
+                // the supervision timeout is the hard budget: if neither side gets a
+                // valid packet through for this long, the central drops the link. any
+                // single blocking stretch (worker/gatt timings above) approaching this
+                // is the smoking gun.
+                println!(
+                    "conn params: interval={} ms, latency={peripheral_latency}, supervision={} ms (budget before drop)",
+                    conn_interval.as_millis(),
+                    supervision_timeout.as_millis()
+                );
+            }
+            GattConnectionEvent::DataLengthUpdated { .. } => println!("data length updated"),
+            // the central drives param updates fine without a peripheral reply,
+            // and responding would need the stack threaded in here; ignore it.
+            GattConnectionEvent::RequestConnectionParams(_) => {}
         }
     }
 }
