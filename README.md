@@ -175,10 +175,24 @@ Related scheduling rules of thumb for this stack:
   (needs `'static` resources via `StaticCell`) so the HCI pump is scheduled
   independently of GATT/advertise work.
 
-## macOS discovery is slow to surface device names
+## macOS quirks (the two things that actually bit us)
 
-macOS CoreBluetooth can be slow and cache-happy about surfacing a peripheral's
-advertised name, especially in a dense BLE environment. If `--send` reports the
-device wasn't found, scan longer (`--time 60`) or scan first with
-`uv run ble.py --time 30` and target the address directly with `--send "…"
---address <UUID>`. Toggling the Mac's Bluetooth off/on clears the cache.
+**1. CoreBluetooth caches a poisoned device state.** After a lot of dev-time
+scanning/connecting, macOS stopped surfacing the board's advertised name
+entirely — even a 4-minute scan missed it, while a fresh machine saw it fine.
+The fix is to **reset the Bluetooth stack**, which clears the cache:
+
+```sh
+brew install blueutil      # one-time
+blueutil -p 0 && sleep 3 && blueutil -p 1     # toggle off/on
+```
+
+(or just toggle Bluetooth in System Settings). After that the board is found in
+seconds. If `--send` ever reports "not found", do this first.
+
+**2. The connection handshake is occasionally flaky.** Discovery is reliable,
+but the connect itself times out maybe 1 in 3 times — the ESP32-S3 controller
+misses the connection timing window. `ble.py --send` retries the connect 3×,
+which makes it reliable in practice; a retried attempt almost always succeeds.
+This is the same scheduling pressure described above, concentrated in the
+timing-critical connection setup rather than advertising.
