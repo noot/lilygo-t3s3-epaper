@@ -15,16 +15,17 @@ embedded-graphics-core = "0.4"
 esp-hal = { version = "1.1", features = ["esp32s3", "unstable"] }
 esp-bootloader-esp-idf = { version = "0.5", features = ["esp32s3"] }
 esp-backtrace = { version = "0.19", features = ["esp32s3", "panic-handler", "println"] }
-esp-println = { version = "0.17", features = ["esp32s3"] }
+esp-println = { version = "0.17", features = ["esp32s3", "log-04"] }
 embedded-hal-bus = "0.3"
 embedded-graphics = "0.8"
+log = "0.4"
 
 # ble stack for the `ble` example. these versions are a matched set: the radio
 # half (esp-radio) and the host half (trouble-host) must agree on the bt-hci
 # version they bridge through, or the ExternalController<BleConnector> won't
 # satisfy trouble's Controller trait. esp-radio 0.18 and trouble-host 0.6 both
 # build on bt-hci 0.8; esp-radio 0.18 + esp-rtos 0.3 are the esp-hal 1.1 line.
-esp-radio = { version = "0.18", features = ["esp32s3", "ble", "unstable"] }
+esp-radio = { version = "0.18", features = ["esp32s3", "ble", "unstable", "log-04"] }
 esp-rtos = { version = "0.3", features = ["esp32s3", "embassy", "esp-radio", "esp-alloc"] }
 esp-alloc = "0.10"
 embassy-executor = "0.10"

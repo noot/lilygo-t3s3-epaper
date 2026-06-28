@@ -143,3 +143,42 @@ Gotchas hit while wiring this up, in case you bump versions:
   RISC-V. Older (0.2) examples gate that argument behind `cfg(riscv32)`.
 - A characteristic whose value type isn't `Copy` (e.g. `Vec<u8, N>`) can't be
   copied out of `&server.…`; borrow it (`let rx = &server.nus.rx;`).
+
+## Scheduler tick rate (don't starve the radio)
+
+esp-rtos defaults to a **100 Hz** scheduler tick (10 ms time-slices). The
+esp-radio BLE controller runs as its own RTOS thread; with 10 ms preemption
+granularity it can't service the link layer often enough, so the board
+advertises sparsely and a scanner can take *minutes* to see it (or miss it
+entirely in a short scan window).
+
+`.cargo/config.toml` raises it to 1000 Hz (1 ms), which is an esp-config
+build-time setting read from the environment:
+
+```toml
+[env]
+ESP_RTOS_CONFIG_TICK_RATE_HZ = "1000"
+```
+
+If you change it, you must force esp-rtos to recompile (cargo doesn't always pick
+up the env change on its own): `cargo clean -p esp-rtos` then rebuild.
+
+Related scheduling rules of thumb for this stack:
+
+- **Build the `ble` example in `--release`** (or at least with optimizations).
+  esp-radio's scheduling glue is timing-sensitive; an unoptimized build can miss
+  controller deadlines.
+- **Never block the embassy executor.** The e-paper refresh is ~2 s of blocking
+  SPI — if you render received messages on the display from inside an async task,
+  that freeze starves the radio. Do display work on a separate path.
+- For heavier setups, spawn `runner.run()` as its own `#[embassy_executor::task]`
+  (needs `'static` resources via `StaticCell`) so the HCI pump is scheduled
+  independently of GATT/advertise work.
+
+## macOS discovery is slow to surface device names
+
+macOS CoreBluetooth can be slow and cache-happy about surfacing a peripheral's
+advertised name, especially in a dense BLE environment. If `--send` reports the
+device wasn't found, scan longer (`--time 60`) or scan first with
+`uv run ble.py --time 30` and target the address directly with `--send "…"
+--address <UUID>`. Toggling the Mac's Bluetooth off/on clears the cache.

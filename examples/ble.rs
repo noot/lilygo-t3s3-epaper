@@ -3,11 +3,14 @@
 //! message. Every write to the RX characteristic is printed over the serial
 //! monitor and echoed back as a notification on the TX characteristic.
 //!
-//! Flash with `cargo run --example ble` (requires the `esp` toolchain + espflash).
+//! Flash with `cargo run --release --example ble` (needs the `esp` toolchain +
+//! espflash). Prefer `--release`: esp-radio's scheduling is timing-sensitive and
+//! an unoptimized build can starve the radio.
 //!
 //! The BLE stack here is async: esp-radio provides the controller, esp-rtos the
 //! scheduler + embassy executor, and trouble-host the GATT host. See README.md
-//! for the version-matching notes (esp-radio/trouble-host must agree on bt-hci).
+//! for the version-matching notes and the scheduler tick-rate setting (the radio
+//! advertises sparsely at the default 100 Hz tick; we raise it to 1000 Hz).
 
 #![no_std]
 #![no_main]
@@ -16,6 +19,7 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_time::Duration;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::interrupt::software::SoftwareInterruptControl;
@@ -52,6 +56,7 @@ struct NusService {
 
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) {
+    esp_println::logger::init_logger_from_env();
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
     // esp-radio needs a heap; 72 KiB matches the trouble-host esp32 examples.
@@ -73,7 +78,7 @@ where
     C: Controller,
 {
     // a fixed random address keeps the device recognisable across reboots.
-    let address = Address::random([0x42, 0x3f, 0x1a, 0x05, 0xe4, 0xff]);
+    let address = Address::random([0x01, 0x00, 0xfe, 0xca, 0xde, 0xc0]);
     println!("ble: our address = {:?}", address.addr.raw());
 
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
@@ -165,15 +170,21 @@ async fn advertise<'values, 'server, C: Controller>(
         ],
         &mut adv_data[..],
     )?;
+    let params = AdvertisementParameters {
+        interval_min: Duration::from_millis(100),
+        interval_max: Duration::from_millis(200),
+        ..Default::default()
+    };
     let advertiser = peripheral
         .advertise(
-            &Default::default(),
+            &params,
             Advertisement::ConnectableScannableUndirected {
                 adv_data: &adv_data[..len],
                 scan_data: &[],
             },
         )
         .await?;
+    println!("ble: advertising started ({len} bytes of adv data), awaiting connection");
     let conn = advertiser.accept().await?.with_attribute_server(server)?;
     println!("ble: central connected");
     Ok(conn)

@@ -767,6 +767,7 @@ dependencies = [
  "esp32s3",
  "fugit",
  "instability",
+ "log",
  "nb 1.1.0",
  "paste",
  "portable-atomic",
@@ -816,6 +817,7 @@ dependencies = [
  "esp-sync",
  "esp-wifi-sys-esp32s3",
  "esp32s3",
+ "log",
 ]
 
 [[package]]
@@ -855,10 +857,17 @@ dependencies = [
  "esp-phy",
  "esp-radio-rtos-driver",
  "esp-sync",
+ "esp-wifi-sys-esp32",
+ "esp-wifi-sys-esp32c2",
+ "esp-wifi-sys-esp32c3",
+ "esp-wifi-sys-esp32c6",
+ "esp-wifi-sys-esp32h2",
+ "esp-wifi-sys-esp32s2",
  "esp-wifi-sys-esp32s3",
  "esp32s3",
  "heapless 0.9.3",
  "instability",
+ "log",
  "num-derive",
  "num-traits",
  "portable-atomic",
@@ -956,10 +965,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-wifi-sys-esp32"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2556f38f5292d9735d4e156e276815fc001c9a0a2be0544a575c5fb867129d24"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "esp-wifi-sys-esp32c2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4b3eb3435dae84de611d4384639e61eed862818223e93fa70c525cb6a70127f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "esp-wifi-sys-esp32c3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b290846b53db9a3965866964260220b67f2c41cc2dbc0b377e7136239fe168a7"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "esp-wifi-sys-esp32c6"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57649401fc2f906a16e2268de88693724a125adcd0eba89b594a157affcee2d5"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "esp-wifi-sys-esp32h2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cf1be2e311f4b4e75b5507c6b007ffc3fcb8c6cb57f83cc6a9569ecdcf58484"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "esp-wifi-sys-esp32s2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a9a7f1bc51e7026c3012cda4f11d8799e5e0c0bb3be85797462219def6c26e"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "esp-wifi-sys-esp32s3"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d8321f44b57d8112cbd8607cc83b85783b9195289acb45532728e3e229e7786"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "esp32"
@@ -1309,6 +1375,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "heapless 0.9.3",
+ "log",
  "static_cell",
  "trouble-host",
 ]
