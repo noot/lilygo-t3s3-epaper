@@ -5,5 +5,7 @@ target = "xtensa-esp32s3-none-elf"
 runner = "espflash flash --monitor"
 rustflags = ["-C", "link-arg=-Tlinkall.x"]
 
+# the lora/display examples only need core, but the ble example pulls esp-radio's
+# heap-backed stack (esp-alloc, allocator-api2), which requires the alloc crate.
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]

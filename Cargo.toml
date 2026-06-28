@@ -19,6 +19,26 @@ esp-println = { version = "0.17", features = ["esp32s3"] }
 embedded-hal-bus = "0.3"
 embedded-graphics = "0.8"
 
+# ble stack for the `ble` example. these versions are a matched set: the radio
+# half (esp-radio) and the host half (trouble-host) must agree on the bt-hci
+# version they bridge through, or the ExternalController<BleConnector> won't
+# satisfy trouble's Controller trait. esp-radio 0.18 and trouble-host 0.6 both
+# build on bt-hci 0.8; esp-radio 0.18 + esp-rtos 0.3 are the esp-hal 1.1 line.
+esp-radio = { version = "0.18", features = ["esp32s3", "ble", "unstable"] }
+esp-rtos = { version = "0.3", features = ["esp32s3", "embassy", "esp-radio", "esp-alloc"] }
+esp-alloc = "0.10"
+embassy-executor = "0.10"
+embassy-time = "0.5"
+embassy-futures = "0.1"
+# the trouble-host gatt_server/gatt_service macros expand to `embassy_sync::...`
+# paths, so it must be a direct dependency (same 0.7 line trouble-host uses).
+embassy-sync = "0.7"
+static_cell = "2"
+trouble-host = { version = "0.6", features = ["default-packet-pool-mtu-255"] }
+# must match the heapless that trouble-host 0.6 uses, or its AsGatt impl for
+# Vec<u8, N> won't apply to ours (two heapless versions = two distinct types).
+heapless = "0.9"
+
 # esp-hal strongly recommends building dependencies with optimizations even in dev.
 [profile.dev.package.esp-hal]
 opt-level = 3
