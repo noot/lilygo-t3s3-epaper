@@ -18,7 +18,6 @@ esp-backtrace = { version = "0.19", features = ["esp32s3", "panic-handler", "pri
 esp-println = { version = "0.17", features = ["esp32s3", "log-04"] }
 embedded-hal-bus = "0.3"
 embedded-graphics = "0.8"
-log = "0.4"
 
 # ble stack for the `ble` example. these versions are a matched set: the radio
 # half (esp-radio) and the host half (trouble-host) must agree on the bt-hci
@@ -30,7 +29,6 @@ esp-rtos = { version = "0.3", features = ["esp32s3", "embassy", "esp-radio", "es
 esp-alloc = "0.10"
 embassy-executor = "0.10"
 embassy-time = "0.5"
-embassy-futures = "0.1"
 # the trouble-host gatt_server/gatt_service macros expand to `embassy_sync::...`
 # paths, so it must be a direct dependency (same 0.7 line trouble-host uses).
 embassy-sync = "0.7"

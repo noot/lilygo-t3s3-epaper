@@ -1360,7 +1360,6 @@ name = "lilygo-t3s3-epaper"
 version = "0.1.0"
 dependencies = [
  "embassy-executor",
- "embassy-futures",
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-graphics",
@@ -1375,7 +1374,6 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "heapless 0.9.3",
- "log",
  "static_cell",
  "trouble-host",
 ]

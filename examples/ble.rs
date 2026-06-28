@@ -18,7 +18,6 @@
 #![allow(clippy::needless_borrows_for_generic_args)]
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
 use embassy_time::Duration;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
@@ -26,6 +25,7 @@ use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
+use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -38,6 +38,11 @@ const MSG_CAP: usize = 64;
 
 const CONNECTIONS_MAX: usize = 1;
 const L2CAP_CHANNELS_MAX: usize = 2; // signalling + att
+
+// concrete types so the controller pump can live in its own (non-generic)
+// embassy task with a 'static lifetime.
+type BleController = ExternalController<BleConnector<'static>, 20>;
+type Resources = HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX>;
 
 // nordic uart service: a de-facto standard "serial over ble" layout that
 // generic tools recognise. rx = central -> peripheral, tx = peripheral -> central.
@@ -55,7 +60,7 @@ struct NusService {
 }
 
 #[esp_rtos::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     esp_println::logger::init_logger_from_env();
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
@@ -68,27 +73,30 @@ async fn main(_spawner: Spawner) {
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
     let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
-    let controller: ExternalController<_, 20> = ExternalController::new(connector);
+    let controller: BleController = ExternalController::new(connector);
 
-    run(controller).await;
-}
-
-async fn run<C>(controller: C)
-where
-    C: Controller,
-{
     // a fixed random address keeps the device recognisable across reboots.
-    let address = Address::random([0x01, 0x00, 0xfe, 0xca, 0xde, 0xc0]);
+    let address = Address::random([0x37, 0x53, 0x33, 0x42, 0x6c, 0xe5]);
     println!("ble: our address = {:?}", address.addr.raw());
 
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
-        HostResources::new();
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
+    // the stack and its resources must be 'static so the controller pump can run
+    // on its own task; park them in StaticCells (one instance, taken once).
+    static RESOURCES: StaticCell<Resources> = StaticCell::new();
+    static STACK: StaticCell<Stack<'static, BleController, DefaultPacketPool>> = StaticCell::new();
+    let resources = RESOURCES.init(Resources::new());
+    let stack: &'static Stack<'static, BleController, DefaultPacketPool> =
+        STACK.init(trouble_host::new(controller, resources).set_random_address(address));
     let Host {
         mut peripheral,
         runner,
         ..
     } = stack.build();
+
+    // pump the controller on its own task so the connection handshake's HCI
+    // traffic is serviced promptly and never waits behind gatt/advertise work.
+    // invariant: spawned exactly once, and the task pool has capacity for it.
+    let token = ble_runner(runner).expect("ble runner task is spawned only once");
+    spawner.spawn(token);
 
     let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
         name: DEVICE_NAME,
@@ -98,21 +106,17 @@ where
 
     println!("ble: advertising as \"{DEVICE_NAME}\", waiting for a central to connect");
 
-    let _ = join(ble_task(runner), async {
-        loop {
-            match advertise(DEVICE_NAME, &mut peripheral, &server).await {
-                Ok(conn) => {
-                    gatt_events_task(&server, &conn).await;
-                }
-                Err(e) => panic!("ble: advertise error: {e:?}"),
-            }
+    loop {
+        match advertise(DEVICE_NAME, &mut peripheral, &server).await {
+            Ok(conn) => gatt_events_task(&server, &conn).await,
+            Err(e) => panic!("ble: advertise error: {e:?}"),
         }
-    })
-    .await;
+    }
 }
 
 /// must run for the whole lifetime of the stack; it pumps the controller.
-async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
+#[embassy_executor::task]
+async fn ble_runner(mut runner: Runner<'static, BleController, DefaultPacketPool>) {
     loop {
         if let Err(e) = runner.run().await {
             panic!("ble: runner error: {e:?}");
