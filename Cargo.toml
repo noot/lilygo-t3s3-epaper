@@ -19,8 +19,32 @@ esp-println = { version = "0.17", features = ["esp32s3"] }
 embedded-hal-bus = "0.3"
 embedded-graphics = "0.8"
 
+# wifi soft-ap for the wifi_lora_bridge example. esp-radio (formerly esp-wifi) is the
+# wifi controller/driver, esp-rtos provides the preemptive scheduler the radio
+# firmware requires, and smoltcp is the TCP/IP stack we drive directly (the AP
+# bring-up, a small DHCP server and the HTTP server all live in the example).
+# this corner of the ecosystem churns — re-pin if cargo can't resolve.
+esp-radio = { version = "0.18", features = ["esp32s3", "wifi", "unstable"] }
+esp-rtos = { version = "0.3", features = ["esp32s3", "esp-radio"] }
+esp-alloc = "0.10"
+smoltcp = { version = "0.13", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+] }
+
 # esp-hal strongly recommends building dependencies with optimizations even in dev.
 [profile.dev.package.esp-hal]
+opt-level = 3
+
+# esp-radio's docs require opt-level 2 or 3, otherwise the wifi driver misbehaves;
+# the esp-rtos scheduler is timing-sensitive too.
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+[profile.dev.package.esp-rtos]
 opt-level = 3
 
 [profile.dev]
