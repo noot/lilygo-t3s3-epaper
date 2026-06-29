@@ -225,52 +225,6 @@ where
         })
     }
 
-    /// Receive a LoRa packet, giving up after roughly `timeout_ms`.
-    ///
-    /// Returns `Ok(None)` when the receive window elapses with no (valid) packet,
-    /// or `Ok(Some(info))` when one arrives. Unlike [`receive`](Self::receive),
-    /// this does not block forever, so a half-duplex bridge can stop listening to
-    /// transmit.
-    pub fn receive_with_timeout(
-        &mut self,
-        buf: &mut [u8],
-        timeout_ms: u32,
-    ) -> Result<Option<RxInfo>, Error<SPI::Error, PE>> {
-        self.write_cmd(cmd::SET_STANDBY, &[cmd::STDBY_RC])?;
-        self.set_packet_params(0xFF)?;
-        self.clear_irq_status(cmd::IRQ_ALL)?;
-
-        // SET_RX timeout is a 24-bit count of 15.625 us steps (64 steps per ms).
-        let steps = timeout_ms.saturating_mul(64).min(0x00FF_FFFF);
-        let b = steps.to_be_bytes();
-        self.write_cmd(cmd::SET_RX, &[b[1], b[2], b[3]])?;
-
-        // dio1 rises on either RX_DONE or the hardware RX timeout; cap the poll a
-        // little past the window so we never hang if the line stays low.
-        match self.wait_dio1(Some(timeout_ms + 4)) {
-            Ok(()) | Err(Error::Timeout) => {}
-            Err(e) => return Err(e),
-        }
-        let irq = self.get_irq_status()?;
-        self.clear_irq_status(cmd::IRQ_ALL)?;
-        if irq & cmd::IRQ_RX_DONE == 0 || irq & cmd::IRQ_CRC_ERR != 0 {
-            return Ok(None);
-        }
-
-        let (len, start) = self.get_rx_buffer_status()?;
-        let len = len as usize;
-        if len > buf.len() {
-            return Err(Error::BufferTooSmall);
-        }
-        self.read_buffer(start, &mut buf[..len])?;
-        let (rssi_dbm, snr_db) = self.get_packet_status()?;
-        Ok(Some(RxInfo {
-            len,
-            rssi_dbm,
-            snr_db,
-        }))
-    }
-
     /// Read the radio's status byte (`GetStatus`). Bits 6:4 encode the chip mode
     /// and bits 3:1 the status of the last command.
     pub fn status(&mut self) -> Result<u8, Error<SPI::Error, PE>> {

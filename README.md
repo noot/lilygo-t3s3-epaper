@@ -147,8 +147,12 @@ BLE host, so the example splits work across the two cores:
   channels (`CriticalSectionRawMutex`, multi-core safe), used with the
   non-blocking `try_send`/`try_receive` so neither core waits on the other. The
   GATT loop polls the LoRa→BLE channel on a 50 ms tick alongside GATT events.
-- LoRa receive is bounded (`Sx1262::receive_with_timeout`) so core 1 stops
-  listening periodically to drain pending BLE→LoRa transmits (half-duplex radio).
+- The LoRa radio runs in continuous receive (`Sx1262::start_receive` +
+  `try_receive`), so it listens whenever it isn't transmitting and the hardware
+  latches an incoming packet until core 1 reads it. A packet that lands during
+  the slow e-paper refresh is captured and read on the next loop rather than
+  missed; only a second packet within one refresh window is dropped. After a
+  transmit (which leaves the radio in standby) core 1 re-arms receive.
 
 ### Host notes
 

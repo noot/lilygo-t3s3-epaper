@@ -353,22 +353,19 @@ fn lora_display_loop(
 
     let mut rx_buf = [0u8; 255];
     let mut updates: u32 = 0;
+
+    // continuous receive: the radio listens the whole time and holds a packet
+    // (with dio1 high) until we read it, so we never duty-cycle the receiver. a
+    // packet that lands during a slow display refresh is captured by the radio
+    // and read on the next loop, rather than missed while we're off-air.
+    radio.start_receive().unwrap();
+
     loop {
         let mut dirty = false;
 
-        // BLE -> LoRa: transmit anything the BLE side handed us.
-        while let Ok(msg) = BLE_TO_LORA.try_receive() {
-            match radio.transmit(&msg) {
-                Ok(()) => println!("lora: transmitted {} bytes", msg.len()),
-                Err(e) => println!("lora: tx error: {e:?}"),
-            }
-            last_ble.clear();
-            let _ = write!(last_ble, "BLE>{}", show(&msg));
-            dirty = true;
-        }
-
-        // LoRa -> BLE: listen briefly, then loop back to check the tx mailbox.
-        match radio.receive_with_timeout(&mut rx_buf, 200) {
+        // service the radio first and every loop: a packet arrives
+        // asynchronously and stays latched until read.
+        match radio.try_receive(&mut rx_buf) {
             Ok(Some(info)) => {
                 let payload = &rx_buf[..info.len];
                 println!(
@@ -383,10 +380,34 @@ fn lora_display_loop(
                 dirty = true;
             }
             Ok(None) => {}
-            Err(e) => println!("lora: rx error: {e:?}"),
+            Err(e) => {
+                // a crc error or transient fault: drop the packet and re-arm
+                // rather than wedge the receiver in a half-configured state.
+                println!("lora: rx error: {e:?}");
+                let _ = radio.start_receive();
+            }
+        }
+
+        // BLE -> LoRa: transmit anything queued. transmit() leaves the radio in
+        // standby, so re-arm continuous receive once the burst is drained.
+        let mut transmitted = false;
+        while let Ok(msg) = BLE_TO_LORA.try_receive() {
+            match radio.transmit(&msg) {
+                Ok(()) => println!("lora: transmitted {} bytes", msg.len()),
+                Err(e) => println!("lora: tx error: {e:?}"),
+            }
+            last_ble.clear();
+            let _ = write!(last_ble, "BLE>{}", show(&msg));
+            dirty = true;
+            transmitted = true;
+        }
+        if transmitted {
+            let _ = radio.start_receive();
         }
 
         if dirty {
+            // lowest priority: the radio stays in continuous receive across the
+            // refresh, so only a second packet within one refresh window is lost.
             render(&mut display, last_ble.as_str(), last_lora.as_str());
             updates += 1;
             // a full refresh now and then clears partial-refresh ghosting.
@@ -395,6 +416,9 @@ fn lora_display_loop(
             } else {
                 let _ = display.refresh_partial();
             }
+        } else {
+            // nothing pending; back off briefly so we don't spin the spi bus hot.
+            Delay::new().delay_ms(5);
         }
     }
 }
