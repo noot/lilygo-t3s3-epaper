@@ -12,6 +12,7 @@ the device-specific glue lives in the examples.
 | `tx`      | Transmits an incrementing LoRa packet every ~3s, mirrors status to the display. |
 | `rx`      | Receives LoRa packets, prints them with RSSI/SNR, shows them on the display. |
 | `ble`     | BLE ⇄ LoRa bridge with an e-paper mirror: messages cross between a BLE central and the LoRa radio, both directions shown on the display (see below). |
+| `wifi_lora_bridge` | Wi-Fi ⇄ LoRa bridge with a web UI: the board hosts an open AP (`lora-tx`) and a small page to send/receive LoRa packets (see below). |
 
 ## Toolchain setup
 
@@ -163,6 +164,20 @@ BLE host, so the example splits work across the two cores:
 - **Linux:** ensure BlueZ is running (`systemctl status bluetooth`), the adapter
   is unblocked and powered (`rfkill unblock bluetooth`, `bluetoothctl power on`),
   and your user can access it. `bluetoothctl power off`/`on` clears stale state.
+
+## Wi-Fi ⇄ LoRa bridge (`wifi_lora_bridge` example)
+
+An alternative bridge that fronts the LoRa radio with Wi-Fi instead of BLE:
+
+```sh
+cargo run --release --example wifi_lora_bridge
+```
+
+The board hosts an open Wi-Fi access point (SSID `lora-tx`) and a small web page.
+Join the network from a phone (the captive portal should open), type a message and
+send it out over LoRa; incoming LoRa packets are listed live on the page and shown
+on the e-paper. The AP bring-up, a minimal DHCP server, and the HTTP server all
+live in the example, driving `smoltcp` directly.
 
 ## BLE stack versions (matched set)
 

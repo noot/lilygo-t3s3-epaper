@@ -19,28 +19,48 @@ esp-println = { version = "0.17", features = ["esp32s3", "log-04"] }
 embedded-hal-bus = "0.3"
 embedded-graphics = "0.8"
 
-# ble stack for the `ble` example. these versions are a matched set: the radio
-# half (esp-radio) and the host half (trouble-host) must agree on the bt-hci
-# version they bridge through, or the ExternalController<BleConnector> won't
-# satisfy trouble's Controller trait. esp-radio 0.18 and trouble-host 0.6 both
-# build on bt-hci 0.8; esp-radio 0.18 + esp-rtos 0.3 are the esp-hal 1.1 line.
-esp-radio = { version = "0.18", features = ["esp32s3", "ble", "unstable", "log-04"] }
+# radio stack shared by the `ble` and `wifi_lora_bridge` examples. esp-radio is
+# the wifi/ble controller and esp-rtos the preemptive scheduler the radio
+# firmware requires; the feature sets are the union the two examples need (`ble`
+# for the NUS bridge, `wifi` for the soft-AP bridge). esp-radio 0.18 + esp-rtos
+# 0.3 are the esp-hal 1.1 line. this corner of the ecosystem churns — re-pin if
+# cargo can't resolve.
+esp-radio = { version = "0.18", features = ["esp32s3", "ble", "wifi", "unstable", "log-04"] }
 esp-rtos = { version = "0.3", features = ["esp32s3", "embassy", "esp-radio", "esp-alloc"] }
 esp-alloc = "0.10"
+
+# `ble` example (trouble-host BLE stack): these must be a matched set — esp-radio
+# and trouble-host bridge through bt-hci 0.8, and the gatt macros expand to
+# `embassy_sync::` paths, so it's a direct dep. heapless must match trouble-host's
+# (0.9), or its AsGatt impl for Vec<u8, N> won't apply to ours.
 embassy-executor = "0.10"
 embassy-time = "0.5"
 embassy-futures = "0.1"
-# the trouble-host gatt_server/gatt_service macros expand to `embassy_sync::...`
-# paths, so it must be a direct dependency (same 0.7 line trouble-host uses).
 embassy-sync = "0.7"
 static_cell = "2"
 trouble-host = { version = "0.6", features = ["default-packet-pool-mtu-255"] }
-# must match the heapless that trouble-host 0.6 uses, or its AsGatt impl for
-# Vec<u8, N> won't apply to ours (two heapless versions = two distinct types).
 heapless = "0.9"
+
+# `wifi_lora_bridge` example: smoltcp is the TCP/IP stack the example drives
+# directly (AP bring-up, a small DHCP server, and the HTTP server).
+smoltcp = { version = "0.13", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+] }
 
 # esp-hal strongly recommends building dependencies with optimizations even in dev.
 [profile.dev.package.esp-hal]
+opt-level = 3
+
+# esp-radio's docs require opt-level 2 or 3, otherwise the wifi driver misbehaves;
+# the esp-rtos scheduler is timing-sensitive too.
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+[profile.dev.package.esp-rtos]
 opt-level = 3
 
 [profile.dev]
