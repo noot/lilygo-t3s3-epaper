@@ -79,95 +79,27 @@ Use `--release` for the `ble` example: esp-radio's scheduling is timing-sensitiv
 and benefits from optimization.
 
 If `cargo run` can't find the board, plug it in over USB and check it enumerates
-(`ls /dev/cu.usb*` — a `usbmodem`/`usbserial` device should appear). The T3-S3
-has a native USB-JTAG/serial peripheral, so no external USB-UART driver is needed
-on recent macOS. If the port is busy, close other serial monitors first.
+as a serial device. The T3-S3 has a native USB-JTAG/serial peripheral, so no
+external USB-UART driver is needed. If the port is busy, close other serial
+monitors first.
 
-## BLE ⇄ LoRa bridge (`ble` example + `tools/ble.py`)
+## BLE ⇄ LoRa bridge (`ble` example)
 
 The `ble` example bridges a BLE central and the LoRa radio, mirroring both
-directions to the e-paper:
-
-- **BLE → LoRa:** a message written over BLE is shown on the display,
-  transmitted over LoRa, and echoed back to the central as an ack.
-- **LoRa → BLE:** a packet received over LoRa is shown on the display and pushed
-  to the connected central as a notification.
-
-The BLE side is a **Nordic UART Service (NUS)** — a de-facto "serial over BLE"
-layout that generic tools recognise:
-
-- Service `6e400001-…`
-- **RX** `6e400002-…` (`write`): central → board (forwarded to LoRa).
-- **TX** `6e400003-…` (`notify`): board → central (BLE echo + LoRa receipts).
-
-`tools/ble.py` is a [`uv`](https://docs.astral.sh/uv/) single-file script (BLE via
-`bleak`) for driving the bridge. It works on Linux (BlueZ), macOS (CoreBluetooth),
-and Windows. Run it with `uv run` (which installs `bleak` for you), or
-`pip install "bleak>=3,<4"` then `python tools/ble.py`.
+directions to the e-paper. It exposes a Nordic UART Service, so generic BLE
+tools work; drive it from a host with `tools/ble.py` (a [`uv`](https://docs.astral.sh/uv/)
+single-file script):
 
 ```sh
-# scan for advertising devices, sorted by signal strength
-uv run tools/ble.py
-
-# scan, then dump each connectable device's GATT table
-uv run tools/ble.py --gatt
-
-# send one message, print the echo, and exit
-uv run tools/ble.py --send "hello from my laptop"
-
-# connect and print TX notifications (watch LoRa receipts + echoes)
-uv run tools/ble.py --listen
-
-# REPL: type a line to send it, see replies inline
-uv run tools/ble.py --interact
-
-# target a specific device (macOS: a CoreBluetooth UUID; Linux/Windows: a MAC)
-uv run tools/ble.py --send "ping" --name T3S3-Msg
-uv run tools/ble.py --send "ping" --address AA:BB:CC:DD:EE:FF
+uv run tools/ble.py              # scan
+uv run tools/ble.py --send "hi"  # send one message, print the echo
+uv run tools/ble.py --listen     # print TX notifications (LoRa receipts + echoes)
+uv run tools/ble.py --interact   # REPL
 ```
 
-End-to-end: `cargo run --release --example ble` in one terminal (watch the
-monitor), then `uv run tools/ble.py --send "hi"` in another. The board's monitor
-prints `ble: received message: "hi" (2 bytes)` and `lora: transmitted 2 bytes`,
-and the Python side prints the echo.
-
-### Firmware design notes (task placement)
-
-The blocking work (LoRa SPI, and the ~2 s e-paper refresh) must never stall the
-BLE host, so the example splits work across the two cores:
-
-- **Core 0 — BLE host** on the embassy executor. The HCI pump (`runner.run()`)
-  runs as its own `#[embassy_executor::task]` (`ble_runner`), with the stack and
-  host resources in `StaticCell`s so they're `'static`. Keeping HCI servicing off
-  the advertise/GATT task keeps the connection handshake reliable.
-- **Core 1 — LoRa + e-paper** (`lora_display_loop`, started via
-  `esp_rtos::start_second_core`). It owns both SPI buses and runs a blocking
-  loop, so a slow refresh or a LoRa transfer can't touch core 0.
-- The two cores exchange fixed-size messages over a pair of `embassy-sync`
-  channels (`CriticalSectionRawMutex`, multi-core safe), used with the
-  non-blocking `try_send`/`try_receive` so neither core waits on the other. The
-  GATT loop polls the LoRa→BLE channel on a 50 ms tick alongside GATT events.
-- The LoRa radio runs in continuous receive (`Sx1262::start_receive` +
-  `try_receive`), so it listens whenever it isn't transmitting and the hardware
-  latches an incoming packet until core 1 reads it. A packet that lands during
-  the slow e-paper refresh is captured and read on the next loop rather than
-  missed; only a second packet within one refresh window is dropped. After a
-  transmit (which leaves the radio in standby) core 1 re-arms receive.
-
-### Host notes
-
-- In a noisy 2.4 GHz environment the connect occasionally times out before the
-  link is up; `tools/ble.py` retries the connect 3× and a later attempt almost
-  always succeeds. Once connected, the transfer itself is reliable.
-- **macOS:** the first BLE run prompts for Bluetooth permission — grant your
-  terminal app access under System Settings → Privacy & Security → Bluetooth. If
-  the board stops being discovered while it's clearly advertising, CoreBluetooth's
-  cache is stale; reset the stack with
-  `brew install blueutil && blueutil -p 0 && sleep 3 && blueutil -p 1` (a full
-  `sudo killall bluetoothd` is the surest reset).
-- **Linux:** ensure BlueZ is running (`systemctl status bluetooth`), the adapter
-  is unblocked and powered (`rfkill unblock bluetooth`, `bluetoothctl power on`),
-  and your user can access it. `bluetoothctl power off`/`on` clears stale state.
+See the module docs in `examples/ble.rs` for the service UUIDs, the dual-core
+task placement, the continuous-receive LoRa loop, and the matched BLE dependency
+set.
 
 ## Wi-Fi ⇄ LoRa bridge (`wifi_lora_bridge` example)
 
@@ -182,25 +114,3 @@ Join the network from a phone (the captive portal should open), type a message a
 send it out over LoRa; incoming LoRa packets are listed live on the page and shown
 on the e-paper. The AP bring-up, a minimal DHCP server, and the HTTP server all
 live in the example, driving `smoltcp` directly.
-
-## BLE stack versions (matched set)
-
-The BLE dependencies are a **matched set**, not independently upgradeable: the
-controller half (esp-radio) and the host half (trouble-host) bridge through
-`bt-hci`, and `ExternalController<BleConnector>` only satisfies trouble-host's
-`Controller` trait when both compile against the *same* `bt-hci`.
-
-| Crate          | Version | Note |
-|----------------|---------|------|
-| `esp-hal`      | 1.1     | board HAL. |
-| `esp-radio`    | 0.18    | BLE controller (`BleConnector`); targets esp-hal ~1.1; `bt-hci` 0.8. |
-| `esp-rtos`     | 0.3     | scheduler + embassy executor; provides `#[esp_rtos::main]`. |
-| `trouble-host` | 0.6     | GATT host; `bt-hci` 0.8 — must match esp-radio. |
-| `bt-hci`       | 0.8     | the HCI version both halves agree on. |
-| `heapless`     | 0.9     | must match trouble-host's, or its `AsGatt` impl for `Vec<u8, N>` won't apply. |
-| `embassy-sync` | 0.7     | the `gatt_server`/`gatt_service` macros expand to `embassy_sync::` paths, so it's a direct dep. |
-| `embassy-executor` / `embassy-time` | 0.10 / 0.5 | what esp-rtos 0.3 expects. |
-
-API notes for this generation: `BleConnector::new(BT, Config)` takes two args
-(there is no `esp_radio::init()`), and `esp_rtos::start(timer, sw_int)` needs a
-`SoftwareInterrupt0` on Xtensa as well as RISC-V.

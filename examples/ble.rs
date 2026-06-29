@@ -1,21 +1,20 @@
 //! BLE <-> LoRa bridge with an e-paper mirror.
 //!
-//! The board advertises as "T3S3-Msg" and exposes a Nordic UART Service. The
-//! data flow is symmetric:
+//! Advertises as "T3S3-Msg" and exposes a Nordic UART Service: RX
+//! `6e400002-...` (write, central -> board, forwarded to LoRa) and TX
+//! `6e400003-...` (notify, board -> central: BLE echo + LoRa receipts), under
+//! service `6e400001-...`. A BLE write and a received LoRa packet are each shown
+//! on the e-paper and relayed to the other side.
 //!
-//! - a message written over BLE is shown on the e-paper, transmitted over LoRa,
-//!   and echoed back to the BLE central on the TX characteristic;
-//! - a packet received over LoRa is shown on the e-paper and pushed out to the
-//!   connected BLE central as a TX notification.
+//! Flash with `cargo run --release --example ble` (requires the `esp` toolchain
+//! and espflash; `--release` because esp-radio's scheduling is timing-sensitive).
+//! Drive it from a host with `tools/ble.py` (`--send`, `--listen`, `--interact`).
 //!
-//! Task placement (so the radio link never starves): the BLE host runs on the
-//! embassy executor on core 0, while the blocking work (LoRa SPI + the slow
-//! e-paper refresh) runs on its own loop on core 1. The two sides exchange
-//! fixed-size messages over a pair of `embassy-sync` channels, polled without
-//! blocking, so neither core ever waits on the other.
-//!
-//! Flash with `cargo run --release --example ble` (needs the `esp` toolchain +
-//! espflash). Prefer `--release`: esp-radio's scheduling is timing-sensitive.
+//! The BLE host runs on core 0 (HCI pump on its own task so the handshake stays
+//! reliable); the blocking LoRa + ~2 s e-paper work runs on core 1, the two
+//! linked by non-blocking `embassy-sync` channels. The scheduler tick is raised
+//! to 1000 Hz (`.cargo/config.toml`) so the radio thread is serviced on time,
+//! and the radio stays in continuous receive so it never duty-cycles off-air.
 
 #![no_std]
 #![no_main]
