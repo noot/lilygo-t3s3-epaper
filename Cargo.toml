@@ -29,6 +29,7 @@ esp-rtos = { version = "0.3", features = ["esp32s3", "embassy", "esp-radio", "es
 esp-alloc = "0.10"
 embassy-executor = "0.10"
 embassy-time = "0.5"
+embassy-futures = "0.1"
 # the trouble-host gatt_server/gatt_service macros expand to `embassy_sync::...`
 # paths, so it must be a direct dependency (same 0.7 line trouble-host uses).
 embassy-sync = "0.7"

@@ -11,7 +11,7 @@ the device-specific glue lives in the examples.
 | `display` | Draws text on the e-paper and demonstrates partial refresh. |
 | `tx`      | Transmits an incrementing LoRa packet every ~3s, mirrors status to the display. |
 | `rx`      | Receives LoRa packets, prints them with RSSI/SNR, shows them on the display. |
-| `ble`     | Advertises as `T3S3-Msg` over BLE and accepts text messages over a Nordic UART Service (see below). |
+| `ble`     | BLE ⇄ LoRa bridge with an e-paper mirror: messages cross between a BLE central and the LoRa radio, both directions shown on the display (see below). |
 
 ## Toolchain setup
 
@@ -82,17 +82,22 @@ If `cargo run` can't find the board, plug it in over USB and check it enumerates
 has a native USB-JTAG/serial peripheral, so no external USB-UART driver is needed
 on recent macOS. If the port is busy, close other serial monitors first.
 
-## BLE messaging (`ble` example + `~/src/ble/ble.py`)
+## BLE ⇄ LoRa bridge (`ble` example + `~/src/ble/ble.py`)
 
-The `ble` example turns the board into a BLE peripheral exposing the **Nordic UART
-Service (NUS)** — a de-facto "serial over BLE" layout that generic tools
-recognise:
+The `ble` example bridges a BLE central and the LoRa radio, mirroring both
+directions to the e-paper:
+
+- **BLE → LoRa:** a message written over BLE is shown on the display,
+  transmitted over LoRa, and echoed back to the central as an ack.
+- **LoRa → BLE:** a packet received over LoRa is shown on the display and pushed
+  to the connected central as a notification.
+
+The BLE side is a **Nordic UART Service (NUS)** — a de-facto "serial over BLE"
+layout that generic tools recognise:
 
 - Service `6e400001-…`
-- **RX** `6e400002-…` (`write`): central → board. Every write is printed on the
-  serial monitor.
-- **TX** `6e400003-…` (`notify`): board → central. The board echoes whatever it
-  receives, so the sender gets an ack.
+- **RX** `6e400002-…` (`write`): central → board (forwarded to LoRa).
+- **TX** `6e400003-…` (`notify`): board → central (BLE echo + LoRa receipts).
 
 `~/src/ble/ble.py` is a [`uv`](https://docs.astral.sh/uv/) single-file script (BLE
 via `bleak`) that scans, dumps GATT tables, and sends messages:
@@ -118,15 +123,24 @@ End-to-end: `cargo run --release --example ble` in one terminal (watch the
 monitor), then `uv run ble.py --send "hi"` in another. The board's monitor prints
 `ble: received message: "hi" (2 bytes)` and the Python side prints the echo.
 
-### Firmware design notes
+### Firmware design notes (task placement)
 
-- The HCI pump (`runner.run()`) runs as its own `#[embassy_executor::task]`
-  (`ble_runner`), with the stack and host resources held in `StaticCell`s so
-  they're `'static`. Keeping HCI servicing off the advertise/GATT task is what
-  keeps the connection handshake reliable.
-- Don't block the embassy executor. The e-paper refresh is ~2 s of blocking SPI;
-  if you ever render received messages on the display, do it off the executor so
-  it can't stall the radio.
+The blocking work (LoRa SPI, and the ~2 s e-paper refresh) must never stall the
+BLE host, so the example splits work across the two cores:
+
+- **Core 0 — BLE host** on the embassy executor. The HCI pump (`runner.run()`)
+  runs as its own `#[embassy_executor::task]` (`ble_runner`), with the stack and
+  host resources in `StaticCell`s so they're `'static`. Keeping HCI servicing off
+  the advertise/GATT task keeps the connection handshake reliable.
+- **Core 1 — LoRa + e-paper** (`lora_display_loop`, started via
+  `esp_rtos::start_second_core`). It owns both SPI buses and runs a blocking
+  loop, so a slow refresh or a LoRa transfer can't touch core 0.
+- The two cores exchange fixed-size messages over a pair of `embassy-sync`
+  channels (`CriticalSectionRawMutex`, multi-core safe), used with the
+  non-blocking `try_send`/`try_receive` so neither core waits on the other. The
+  GATT loop polls the LoRa→BLE channel on a 50 ms tick alongside GATT events.
+- LoRa receive is bounded (`Sx1262::receive_with_timeout`) so core 1 stops
+  listening periodically to drain pending BLE→LoRa transmits (half-duplex radio).
 
 ### macOS notes
 
@@ -136,6 +150,9 @@ monitor), then `uv run ble.py --send "hi"` in another. The board's monitor print
   CoreBluetooth's cache is stale. Reset the Bluetooth stack and retry:
   `brew install blueutil && blueutil -p 0 && sleep 3 && blueutil -p 1` (or toggle
   Bluetooth in System Settings).
+- In a noisy 2.4 GHz environment the connect occasionally times out before the
+  link is up; `ble.py --send` retries 3× and a later attempt almost always
+  succeeds. Once connected, the transfer itself is reliable.
 
 ## BLE stack versions (matched set)
 
