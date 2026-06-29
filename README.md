@@ -82,7 +82,7 @@ If `cargo run` can't find the board, plug it in over USB and check it enumerates
 has a native USB-JTAG/serial peripheral, so no external USB-UART driver is needed
 on recent macOS. If the port is busy, close other serial monitors first.
 
-## BLE ⇄ LoRa bridge (`ble` example + `~/src/ble/ble.py`)
+## BLE ⇄ LoRa bridge (`ble` example + `tools/ble.py`)
 
 The `ble` example bridges a BLE central and the LoRa radio, mirroring both
 directions to the e-paper:
@@ -99,29 +99,36 @@ layout that generic tools recognise:
 - **RX** `6e400002-…` (`write`): central → board (forwarded to LoRa).
 - **TX** `6e400003-…` (`notify`): board → central (BLE echo + LoRa receipts).
 
-`~/src/ble/ble.py` is a [`uv`](https://docs.astral.sh/uv/) single-file script (BLE
-via `bleak`) that scans, dumps GATT tables, and sends messages:
+`tools/ble.py` is a [`uv`](https://docs.astral.sh/uv/) single-file script (BLE via
+`bleak`) for driving the bridge. It works on Linux (BlueZ), macOS (CoreBluetooth),
+and Windows. Run it with `uv run` (which installs `bleak` for you), or
+`pip install "bleak>=3,<4"` then `python tools/ble.py`.
 
 ```sh
-cd ~/src/ble
-
 # scan for advertising devices, sorted by signal strength
-uv run ble.py
+uv run tools/ble.py
 
-# dump the GATT table of every connectable device
-uv run ble.py --gatt
+# scan, then dump each connectable device's GATT table
+uv run tools/ble.py --gatt
 
-# send a message to the board (finds it by advertised name "T3S3-Msg")
-uv run ble.py --send "hello from my laptop"
+# send one message, print the echo, and exit
+uv run tools/ble.py --send "hello from my laptop"
 
-# target a specific device explicitly
-uv run ble.py --send "ping" --name T3S3-Msg
-uv run ble.py --send "ping" --address AA:BB:CC:DD:EE:FF
+# connect and print TX notifications (watch LoRa receipts + echoes)
+uv run tools/ble.py --listen
+
+# REPL: type a line to send it, see replies inline
+uv run tools/ble.py --interact
+
+# target a specific device (macOS: a CoreBluetooth UUID; Linux/Windows: a MAC)
+uv run tools/ble.py --send "ping" --name T3S3-Msg
+uv run tools/ble.py --send "ping" --address AA:BB:CC:DD:EE:FF
 ```
 
 End-to-end: `cargo run --release --example ble` in one terminal (watch the
-monitor), then `uv run ble.py --send "hi"` in another. The board's monitor prints
-`ble: received message: "hi" (2 bytes)` and the Python side prints the echo.
+monitor), then `uv run tools/ble.py --send "hi"` in another. The board's monitor
+prints `ble: received message: "hi" (2 bytes)` and `lora: transmitted 2 bytes`,
+and the Python side prints the echo.
 
 ### Firmware design notes (task placement)
 
@@ -142,17 +149,20 @@ BLE host, so the example splits work across the two cores:
 - LoRa receive is bounded (`Sx1262::receive_with_timeout`) so core 1 stops
   listening periodically to drain pending BLE→LoRa transmits (half-duplex radio).
 
-### macOS notes
+### Host notes
 
-- The first BLE run prompts for Bluetooth permission — grant your terminal app
-  access under System Settings → Privacy & Security → Bluetooth.
-- If `--send` reports the board wasn't found while it's clearly advertising,
-  CoreBluetooth's cache is stale. Reset the Bluetooth stack and retry:
-  `brew install blueutil && blueutil -p 0 && sleep 3 && blueutil -p 1` (or toggle
-  Bluetooth in System Settings).
 - In a noisy 2.4 GHz environment the connect occasionally times out before the
-  link is up; `ble.py --send` retries 3× and a later attempt almost always
-  succeeds. Once connected, the transfer itself is reliable.
+  link is up; `tools/ble.py` retries the connect 3× and a later attempt almost
+  always succeeds. Once connected, the transfer itself is reliable.
+- **macOS:** the first BLE run prompts for Bluetooth permission — grant your
+  terminal app access under System Settings → Privacy & Security → Bluetooth. If
+  the board stops being discovered while it's clearly advertising, CoreBluetooth's
+  cache is stale; reset the stack with
+  `brew install blueutil && blueutil -p 0 && sleep 3 && blueutil -p 1` (a full
+  `sudo killall bluetoothd` is the surest reset).
+- **Linux:** ensure BlueZ is running (`systemctl status bluetooth`), the adapter
+  is unblocked and powered (`rfkill unblock bluetooth`, `bluetoothctl power on`),
+  and your user can access it. `bluetoothctl power off`/`on` clears stale state.
 
 ## BLE stack versions (matched set)
 
